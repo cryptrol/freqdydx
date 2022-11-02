@@ -2,6 +2,8 @@
 
 Freqtrade as of today does not support DYDX, this repo contains an implementation of a minimal API endpoint to connect with [Freqtrade](https://freqtrade.io) webhooks.
 
+> :warning: **This is a WIP, not tested in production**
+> 
 ### Setup ###
 
 Populate a file called `private_config.py` with your data.
