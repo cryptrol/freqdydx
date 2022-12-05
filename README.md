@@ -2,8 +2,6 @@
 
 Freqtrade as of today does not support DYDX, this repo contains an implementation of a minimal API endpoint to connect with [Freqtrade](https://freqtrade.io) webhooks.
 
-> :warning: **This is a WIP, not tested in production**
-> 
 ### Setup ###
 
 Populate a file called `private_config.py` with your data.
@@ -46,6 +44,7 @@ Freqtrade posts form encoded to our API.
         "amount": "{amount}",
         "stake_amount": "{stake_amount}",
         "open_rate": "{open_rate}",
+        "limit": "{limit}",
     },
     "webhookstatus": {
         "command": "Status",
@@ -79,7 +78,7 @@ curl -X POST http://127.0.0.1:7000/api -F command=Exit \
     -F direction=Long \
     -F amount=0.1 \
     -F stake_amount=20 \
-    -F open_rate=120.111 
+    -F limit=120.111 
 ```
 
 

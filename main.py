@@ -32,7 +32,8 @@ LIMIT_FEE_PERCENT = 0.051
 MODE = 'DRY'
 # Order expiration in seconds
 ORDER_EXPIRATION = 86400
-
+# If margin fraction requirements for the market are higher than that, do not take the trade.
+INITIAL_MARGIN_FRACTION_LIMIT = 0.5
 # TELEGRAM config (needs token and chat_id on private config)
 TELEGRAM_ENABLED = True
 TELEGRAM_SEND_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
@@ -63,8 +64,9 @@ def position():
                 logging.error('Direction must be either Long or Short, but it was : {}'.format(direction))
                 return 'KO'
             amount = float(request.form['amount'])
-            stake_amount = float(request.form['stake_amount'])  # Unused
             open_rate = float(request.form['open_rate'])
+            if command == 'Exit':
+                limit = float(request.form['limit'])
             asset = pair.split("/")[0]
             if CHECK_ALLOWED_ASSET:
                 if asset not in ALLOWED_ASSETS:
@@ -86,9 +88,9 @@ def position():
             'market': market,
             'order_type': ORDER_TYPE_LIMIT,
             'post_only': POST_ONLY,
-            'size': amount,
-            'price': open_rate,
-            'limit_fee': (amount * LIMIT_FEE_PERCENT)/100,
+            'size': str(amount),
+            'price': str(open_rate) if command == 'Entry' else str(limit),
+            'limit_fee': str((amount * LIMIT_FEE_PERCENT)/100),
             'time_in_force': TIME_IN_FORCE,
             'expiration_epoch_seconds': int(time.time()) + ORDER_EXPIRATION,
         }
@@ -108,8 +110,8 @@ def position():
             if market not in account['openPositions']:
                 logging.error('Trying to exit a position, but no open position found for {}, ignoring order.'.format(market))
                 return 'KO'
-            elif account['openPositions'][market]['side'].lower() == direction.lower():
-                logging.error('Trying to exit a position using a same direction order for {}, NGMI.'.format(market))
+            elif account['openPositions'][market]['side'].lower() != direction.lower():
+                logging.error('Trying to exit a position on the wrong direction for {}, NGMI.'.format(market))
                 return 'KO'
             if direction == 'Short':
                 order_params['side'] = ORDER_SIDE_BUY
@@ -119,6 +121,18 @@ def position():
                 logging.info('[{}] Closing long position with order params : {}'.format(MODE, order_params))
         if MODE == 'LIVE':
             try:
+                # Get market data for pair
+                market_data = client.public.get_markets(order_params['market'])
+                # Check Initial Margin Fraction requirementes are met while entering a position
+                if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data['markets'][order_params['market']]['initialMarginFraction']):
+                    logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
+                                 'not taking the trade', market_data['markets'][order_params['market']]['initialMarginFraction'])
+                    return 'KO'
+                # Make sure order size is a multiple of stepSize for this market.
+                step = float(market_data['markets'][order_params['market']]['stepSize'])
+                newsize = step * round(float(order_params['size']) / step)
+                # Set the new order size
+                order_params['size'] = str(newsize)
                 order_response = client.private.create_order(**order_params)
                 order_id = order_response['order']['id']
                 logging.info('Order {} successfully posted, order response data : {}'.format(order_id, order_response['order']))
