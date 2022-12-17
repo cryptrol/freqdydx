@@ -124,18 +124,21 @@ def position():
                 # Get market data for pair
                 market_data = client.public.get_markets(order_params['market'])
                 # Check Initial Margin Fraction requirementes are met while entering a position
-                if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data['markets'][order_params['market']]['initialMarginFraction']):
+                if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data.data['markets'][order_params['market']]['initialMarginFraction']):
                     logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
-                                 'not taking the trade', market_data['markets'][order_params['market']]['initialMarginFraction'])
+                                 'not taking the trade', market_data.data['markets'][order_params['market']]['initialMarginFraction'])
                     return 'KO'
                 # Make sure order size is a multiple of stepSize for this market.
-                step = float(market_data['markets'][order_params['market']]['stepSize'])
+                step = float(market_data.data['markets'][order_params['market']]['stepSize'])
                 newsize = step * round(float(order_params['size']) / step)
-                # Set the new order size
                 order_params['size'] = str(newsize)
+                # Make sure price is a multiple of tickSize for this market
+                tick = float(market_data.data['markets'][order_params['market']]['tickSize'])
+                newprice = tick * round(float(order_params['price']) / tick)
+                order_params['price'] = newprice
                 order_response = client.private.create_order(**order_params)
-                order_id = order_response['order']['id']
-                logging.info('Order {} successfully posted, order response data : {}'.format(order_id, order_response['order']))
+                order_id = order_response.data['order']['id']
+                logging.info('Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order']))
             except Exception as err:
                 logging.error('Error posting order : {}'.format(err))
                 return 'KO'
