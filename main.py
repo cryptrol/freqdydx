@@ -135,7 +135,7 @@ def position():
                 # Make sure price is a multiple of tickSize for this market
                 tick = float(market_data.data['markets'][order_params['market']]['tickSize'])
                 newprice = tick * round(float(order_params['price']) / tick)
-                order_params['price'] = newprice
+                order_params['price'] = str(newprice)
                 order_response = client.private.create_order(**order_params)
                 order_id = order_response.data['order']['id']
                 logging.info('Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order']))
