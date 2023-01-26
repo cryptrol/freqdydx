@@ -46,8 +46,10 @@ ALLOWED_ASSETS = ['BTC', 'ETH']
 # Post message to telegram
 def send_telegram_message(message):
     if TELEGRAM_ENABLED:
-        requests.post(TELEGRAM_SEND_URL, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message})
-
+        try:
+            requests.post(TELEGRAM_SEND_URL, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message})
+        except Exception as err:
+            logging.error('Error sending telegram message. Exception : {}'.format(err))
 
 # API endpoint listening on http://localhost:PORT/api
 @app.route('/api', methods=['POST'])
@@ -88,9 +90,7 @@ def position():
             'market': market,
             'order_type': ORDER_TYPE_LIMIT,
             'post_only': POST_ONLY,
-            'size': str(amount),
             'price': str(open_rate) if command == 'Entry' else str(limit),
-            'limit_fee': str((amount * LIMIT_FEE_PERCENT)/100),
             'time_in_force': TIME_IN_FORCE,
             'expiration_epoch_seconds': int(time.time()) + ORDER_EXPIRATION,
         }
@@ -102,10 +102,8 @@ def position():
                 return 'KO'
             if direction == 'Short':
                 order_params['side'] = ORDER_SIDE_SELL
-                logging.info('[{}] Opening short position with order params : {}'.format(MODE, order_params))
             elif direction == 'Long':
                 order_params['side'] = ORDER_SIDE_BUY
-                logging.info('[{}] Opening long position with order params : {}'.format(MODE, order_params))
         elif command == 'Exit':
             if market not in account['openPositions']:
                 logging.error('Trying to exit a position, but no open position found for {}, ignoring order.'.format(market))
@@ -115,39 +113,38 @@ def position():
                 return 'KO'
             if direction == 'Short':
                 order_params['side'] = ORDER_SIDE_BUY
-                logging.info('[{}] Closing Short position with order params : {}'.format(MODE, order_params))
             elif direction == 'Long':
                 order_params['side'] = ORDER_SIDE_SELL
-                logging.info('[{}] Closing long position with order params : {}'.format(MODE, order_params))
-        if MODE == 'LIVE':
-            try:
-                # Get market data for pair
-                market_data = client.public.get_markets(order_params['market'])
-                # Check Initial Margin Fraction requirementes are met while entering a position
-                if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data.data['markets'][order_params['market']]['initialMarginFraction']):
-                    logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
-                                 'not taking the trade', market_data.data['markets'][order_params['market']]['initialMarginFraction'])
-                    return 'KO'
-                # Make sure order size is a multiple of stepSize for this market.
-                step = float(market_data.data['markets'][order_params['market']]['stepSize'])
-                newsize = step * round(float(order_params['size']) / step)
-                order_params['size'] = str(newsize)
-                # Make sure price is a multiple of tickSize for this market
-                tick = float(market_data.data['markets'][order_params['market']]['tickSize'])
-                newprice = tick * round(float(order_params['price']) / tick)
-                order_params['price'] = str(newprice)
+
+        try:
+            # Get market data for pair
+            market_data = client.public.get_markets(market)
+            # Check Initial Margin Fraction requirementes are met while entering a position
+            if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data.data['markets'][market]['initialMarginFraction']):
+                logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
+                             'not taking the trade', market_data.data['markets'][market]['initialMarginFraction'])
+                return 'KO'
+            # Make sure order size is a multiple of stepSize for this market.
+            step = float(market_data.data['markets'][market]['stepSize'])
+            newsize = step * round(float(amount) / step)
+            order_params['size'] = str(round(newsize, len(market_data.data['markets'][market]['assetResolution'])))
+            order_params['limit_fee'] = str((amount * LIMIT_FEE_PERCENT) / 100)
+            # Make sure price is a multiple of tickSize for this market
+            tick = float(market_data.data['markets'][market]['tickSize'])
+            newprice = tick * round(float(order_params['price']) / tick)
+            order_params['price'] = str(newprice)
+            logging.info('[{} mode] Posting order with data :{}'.format(MODE, order_params))
+            if MODE == 'LIVE':
                 order_response = client.private.create_order(**order_params)
                 order_id = order_response.data['order']['id']
-                logging.info('Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order']))
-            except Exception as err:
-                logging.error('Error posting order : {}'.format(err))
-                return 'KO'
-        elif MODE == 'DRY':
-            logging.info('Order not posted running in DRY mode.')
-        try:
-            send_telegram_message('[{} mode] - Order posted, with params : {}'.format(MODE, order_params))
+                message = 'Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order'])
+                logging.info(message)
+                send_telegram_message(message)
         except Exception as err:
-            logging.error('Error sending Telegram message. Error : {}'.format(err))
+            message = 'Error posting order : {}'.format(err)
+            logging.error(message)
+            send_telegram_message(message)
+            return 'KO'
     elif command == 'Status':
         logging.info('Status received : {}'.format(request.form['command']))
     elif command == 'Account':
