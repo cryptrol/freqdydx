@@ -1,6 +1,5 @@
 from flask import Flask, jsonify, request, send_file
-from dydx3.constants import ORDER_SIDE_BUY, ORDER_TYPE_LIMIT, ORDER_SIDE_SELL
-import decimal
+from dydx3.constants import ORDER_SIDE_BUY, ORDER_TYPE_LIMIT, ORDER_SIDE_SELL, ORDER_TYPE_MARKET, ORDER_TYPE_STOP, ORDER_TYPE_TAKE_PROFIT
 import time
 from dydx3 import Client
 
@@ -9,12 +8,13 @@ from private_config import \
     STARK_PRIVATE_KEY, \
     ETHEREUM_ADDRESS, \
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+
 import requests
 import logging
 
 app = Flask(__name__)
 
-PORT = 7000
+PORT = 5000
 
 # Default API endpoint for DYDX Exchange
 DYDX_HOST = 'https://api.dydx.exchange/'
@@ -22,26 +22,31 @@ DYDX_HOST = 'https://api.dydx.exchange/'
 # Stake currency, only USD is supported, do not change.
 STAKE_CURRENCY = 'USD'
 # FOK, GTT or IOK
-TIME_IN_FORCE = 'GTT'
+TIME_IN_FORCE = 'FOK'
+TIME_IN_FORCE_FOK = 'FOK'
+TIME_IN_FORCE_GTT = 'GTT'
+STOP_LOSS_PERC = 0.5
+PROFIT_PERC = 0.5
+
 # Post only is used to make sure your order executes only as a maker
 POST_ONLY = False
 
 # Maximum Fee as a percentage
 # Tier 1 in DYDX is 0.05%
-LIMIT_FEE_PERCENT = '0.051'
+LIMIT_FEE_PERCENT = 0.5
 # LIVE for active trading DRY for testing
-MODE = 'DRY'
+MODE = 'LIVE'
 # Order expiration in seconds
 ORDER_EXPIRATION = 86400
 # If margin fraction requirements for the market are higher than that, do not take the trade.
-INITIAL_MARGIN_FRACTION_LIMIT = '0.5'
+INITIAL_MARGIN_FRACTION_LIMIT = 0.5
 # TELEGRAM config (needs token and chat_id on private config)
-TELEGRAM_ENABLED = True
+TELEGRAM_ENABLED = False
 TELEGRAM_SEND_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
 # If True, the trade will go through only if the asset is included in the allowed asset list.
-CHECK_ALLOWED_ASSET = False
-ALLOWED_ASSETS = ['BTC', 'ETH']
+CHECK_ALLOWED_ASSET = True
+ALLOWED_ASSETS = ['ETH', 'SOL', 'MATIC', 'AVAX', 'DOGE', 'ETC', 'ATOM', 'ADA', 'LTC', 'XMR','BNB','XRP']
 
 
 # Post message to telegram
@@ -51,6 +56,7 @@ def send_telegram_message(message):
             requests.post(TELEGRAM_SEND_URL, json={'chat_id': TELEGRAM_CHAT_ID, 'text': message})
         except Exception as err:
             logging.error('Error sending telegram message. Exception : {}'.format(err))
+
 
 # API endpoint listening on http://localhost:PORT/api
 @app.route('/api', methods=['POST'])
@@ -66,10 +72,10 @@ def position():
             if direction not in ['Long', 'Short']:
                 logging.error('Direction must be either Long or Short, but it was : {}'.format(direction))
                 return 'KO'
-            amount = decimal.Decimal(request.form['amount'])
-            open_rate = decimal.Decimal(request.form['open_rate'])
+            amount = float(request.form['amount'])
+            open_rate = float(request.form['open_rate'])
             if command == 'Exit':
-                limit = decimal.Decimal(request.form['limit'])
+                limit = float(request.form['limit'])
             asset = pair.split("/")[0]
             if CHECK_ALLOWED_ASSET:
                 if asset not in ALLOWED_ASSETS:
@@ -85,14 +91,17 @@ def position():
         account_response = client.private.get_account()
         account = account_response.data['account']
         position_id = account['positionId']
-
+        market_req = client.public.get_markets(market=market)
+        price_long = float(market_req.data['markets'][market]['oraclePrice'])
+        price_short = float(market_req.data['markets'][market]['indexPrice'])
         order_params = {
             'position_id': position_id,
             'market': market,
-            'order_type': ORDER_TYPE_LIMIT,
+            'order_type': ORDER_TYPE_MARKET if command == 'Exit' else ORDER_TYPE_LIMIT,
             'post_only': POST_ONLY,
-            'price': str(open_rate) if command == 'Entry' else str(limit),
-            'time_in_force': TIME_IN_FORCE,
+            'price': price_long if direction == 'Long' else price_short,
+            'reduce_only': True if command == 'Exit' else False,
+            'time_in_force': str('IOC') if command == 'Exit' else str('IOC'),
             'expiration_epoch_seconds': int(time.time()) + ORDER_EXPIRATION,
         }
         logging.info('Order params before setting side: {}'.format(order_params))
@@ -121,25 +130,91 @@ def position():
             # Get market data for pair
             market_data = client.public.get_markets(market)
             # Check Initial Margin Fraction requirementes are met while entering a position
-            if command == 'Entry' and decimal.Decimal(INITIAL_MARGIN_FRACTION_LIMIT) < decimal.Decimal(market_data.data['markets'][market]['initialMarginFraction']):
+            if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data.data['markets'][market]['initialMarginFraction']):
                 logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
                              'not taking the trade', market_data.data['markets'][market]['initialMarginFraction'])
                 return 'KO'
             # Make sure order size is a multiple of stepSize for this market.
-            step = decimal.Decimal(market_data.data['markets'][market]['stepSize'])
-            newsize = step * round(decimal.Decimal(amount) / step)
+            step = float(market_data.data['markets'][market]['stepSize'])
+            newsize = step * round(float(amount) / step)
             order_params['size'] = str(round(newsize, len(market_data.data['markets'][market]['assetResolution'])))
-            order_params['limit_fee'] = str((amount * decimal.Decimal(LIMIT_FEE_PERCENT)) / decimal.Decimal('100'))
+            #order_params['limit_fee'] = str((amount * LIMIT_FEE_PERCENT) / 100)
+            order_params['limit_fee'] = str(0.1)
             # Make sure price is a multiple of tickSize for this market
-            tick = decimal.Decimal(market_data.data['markets'][market]['tickSize'])
-            newprice = tick * round(decimal.Decimal(order_params['price']) / tick)
+            tick = float(market_data.data['markets'][market]['tickSize'])
+            newprice = round(tick * round(float(order_params['price']) / tick),3)
             order_params['price'] = str(newprice)
             logging.info('[{} mode] Posting order with data :{}'.format(MODE, order_params))
             if MODE == 'LIVE':
+                client.private.cancel_all_orders(market=market)
+                time.sleep(2)
                 order_response = client.private.create_order(**order_params)
                 order_id = order_response.data['order']['id']
+                order_status = order_response.data['order']['status']
+                order_price = float(order_response.data['order']['price'])
+                #order_amount = order_response.data['order']['size']
                 message = 'Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order'])
+                logging.info(order_response)
                 logging.info(message)
+                time.sleep(2)
+                if command == 'Entry':
+                    ordersize = str(round(newsize, len(market_data.data['markets'][market]['assetResolution'])))
+                    # Also make a stop loss order
+                    if direction == 'Long':
+                        stop_limit_price = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
+                        stop_limit_trigger = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
+                    else:
+                        stop_limit_price = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
+                        stop_limit_trigger = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
+                        
+                    stop_limit_price = round(tick * round(float(stop_limit_price) / tick),4)
+                    stop_limit_trigger = round(tick * round(float(stop_limit_trigger) / tick),4)
+                    
+                    stoploss_order = client.private.create_order(
+                        position_id=position_id,
+                        market=market,
+                        side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
+                        order_type=ORDER_TYPE_STOP,
+                        post_only=False,
+                        reduce_only=True,
+                        size=ordersize,
+                        price=str(stop_limit_price),
+                        trigger_price=str(stop_limit_trigger),
+                        limit_fee=str(0.1),
+                        time_in_force= str('IOC'),
+                        expiration_epoch_seconds=time.time() + 15000,
+                    ).data
+                    #stoploss_order.data['order']
+                    #message = 'Order {} successfully posted, order response data : {}'.format(stoploss_order.data['order']['id'], stoploss_order.data['order'])
+                    logging.info(stoploss_order)
+                    # Also make a take-profit order
+                    if direction == 'Long':
+                        take_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
+                        trigger_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
+                    else:
+                        take_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
+                        trigger_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
+                    
+                    take_profit_price = round(tick * round(float(take_profit_price) / tick),4)
+                    trigger_profit_price = round(tick * round(float(trigger_profit_price) / tick),4)
+                    
+                    take_profit_order = client.private.create_order(
+                        position_id=position_id,
+                        market=market,
+                        side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
+                        order_type=ORDER_TYPE_TAKE_PROFIT,
+                        post_only=False,
+                        size=ordersize,
+                        reduce_only=True,
+                        price=str(take_profit_price),
+                        trigger_price=str(trigger_profit_price),
+                        limit_fee=str(0.1),
+                        time_in_force= str('IOC'),
+                        expiration_epoch_seconds=time.time() + 15000,
+                    ).data
+                    #take_profit_order.data['order']
+                    #message = 'Order {} successfully posted, order response data : {}'.format(take_profit_order.data['order']['id'], take_profit_order.data['order'])
+                    logging.info(take_profit_order)
                 send_telegram_message(message)
         except Exception as err:
             message = 'Error posting order : {}'.format(err)
@@ -175,10 +250,10 @@ def create_client() -> Client:
 
 if __name__ == '__main__':
     logging.basicConfig(
-        filename='log.txt',
+        filename='/app/log.txt',
         encoding='utf-8',
         level=logging.DEBUG,
         format='%(asctime)s %(levelname)-8s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    app.run(debug=False, port=PORT)
+    app.run(debug=True, host='0.0.0.0', port=PORT)
