@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, send_file
 from dydx3.constants import ORDER_SIDE_BUY, ORDER_TYPE_LIMIT, ORDER_SIDE_SELL
+import decimal
 import time
 from dydx3 import Client
 
@@ -27,13 +28,13 @@ POST_ONLY = False
 
 # Maximum Fee as a percentage
 # Tier 1 in DYDX is 0.05%
-LIMIT_FEE_PERCENT = 0.051
+LIMIT_FEE_PERCENT = '0.051'
 # LIVE for active trading DRY for testing
 MODE = 'DRY'
 # Order expiration in seconds
 ORDER_EXPIRATION = 86400
 # If margin fraction requirements for the market are higher than that, do not take the trade.
-INITIAL_MARGIN_FRACTION_LIMIT = 0.5
+INITIAL_MARGIN_FRACTION_LIMIT = '0.5'
 # TELEGRAM config (needs token and chat_id on private config)
 TELEGRAM_ENABLED = True
 TELEGRAM_SEND_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
@@ -65,10 +66,10 @@ def position():
             if direction not in ['Long', 'Short']:
                 logging.error('Direction must be either Long or Short, but it was : {}'.format(direction))
                 return 'KO'
-            amount = float(request.form['amount'])
-            open_rate = float(request.form['open_rate'])
+            amount = decimal.Decimal(request.form['amount'])
+            open_rate = decimal.Decimal(request.form['open_rate'])
             if command == 'Exit':
-                limit = float(request.form['limit'])
+                limit = decimal.Decimal(request.form['limit'])
             asset = pair.split("/")[0]
             if CHECK_ALLOWED_ASSET:
                 if asset not in ALLOWED_ASSETS:
@@ -120,18 +121,18 @@ def position():
             # Get market data for pair
             market_data = client.public.get_markets(market)
             # Check Initial Margin Fraction requirementes are met while entering a position
-            if command == 'Entry' and INITIAL_MARGIN_FRACTION_LIMIT < float(market_data.data['markets'][market]['initialMarginFraction']):
+            if command == 'Entry' and decimal.Decimal(INITIAL_MARGIN_FRACTION_LIMIT) < decimal.Decimal(market_data.data['markets'][market]['initialMarginFraction']):
                 logging.info('Initial margin fraction limit is higher than the current market limit ({}), '
                              'not taking the trade', market_data.data['markets'][market]['initialMarginFraction'])
                 return 'KO'
             # Make sure order size is a multiple of stepSize for this market.
-            step = float(market_data.data['markets'][market]['stepSize'])
-            newsize = step * round(float(amount) / step)
+            step = decimal.Decimal(market_data.data['markets'][market]['stepSize'])
+            newsize = step * round(decimal.Decimal(amount) / step)
             order_params['size'] = str(round(newsize, len(market_data.data['markets'][market]['assetResolution'])))
-            order_params['limit_fee'] = str((amount * LIMIT_FEE_PERCENT) / 100)
+            order_params['limit_fee'] = str((amount * decimal.Decimal(LIMIT_FEE_PERCENT)) / decimal.Decimal('100'))
             # Make sure price is a multiple of tickSize for this market
-            tick = float(market_data.data['markets'][market]['tickSize'])
-            newprice = tick * round(float(order_params['price']) / tick)
+            tick = decimal.Decimal(market_data.data['markets'][market]['tickSize'])
+            newprice = tick * round(decimal.Decimal(order_params['price']) / tick)
             order_params['price'] = str(newprice)
             logging.info('[{} mode] Posting order with data :{}'.format(MODE, order_params))
             if MODE == 'LIVE':
