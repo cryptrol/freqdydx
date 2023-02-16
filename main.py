@@ -3,16 +3,16 @@ from dydx3.constants import ORDER_SIDE_BUY, ORDER_TYPE_LIMIT, ORDER_SIDE_SELL, O
 import time
 from dydx3 import Client
 
+import requests
+import logging
+
+app = Flask(__name__)
+
 from private_config import \
     API_SECRET, API_KEY, API_PASSPHRASE, \
     STARK_PRIVATE_KEY, \
     ETHEREUM_ADDRESS, \
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-
-import requests
-import logging
-
-app = Flask(__name__)
 
 PORT = 5000
 
@@ -21,12 +21,14 @@ DYDX_HOST = 'https://api.dydx.exchange/'
 
 # Stake currency, only USD is supported, do not change.
 STAKE_CURRENCY = 'USD'
-# FOK, GTT or IOK
-TIME_IN_FORCE = 'FOK'
-TIME_IN_FORCE_FOK = 'FOK'
-TIME_IN_FORCE_GTT = 'GTT'
-STOP_LOSS_PERC = 0.5
-PROFIT_PERC = 0.5
+
+# Enable Stop Loss
+ENABLE_SL = True
+STOP_LOSS_PERC = 0.5 # Percent - Could be sent by freqtrade in the future for individual values per pair
+
+# Enable Take Profit
+ENABLE_TP = True
+PROFIT_PERC = 0.5 # Percent - Could be sent by freqtrade in the future for individual values per pair
 
 # Post only is used to make sure your order executes only as a maker
 POST_ONLY = False
@@ -34,12 +36,16 @@ POST_ONLY = False
 # Maximum Fee as a percentage
 # Tier 1 in DYDX is 0.05%
 LIMIT_FEE_PERCENT = 0.5
+
 # LIVE for active trading DRY for testing
 MODE = 'LIVE'
+
 # Order expiration in seconds
 ORDER_EXPIRATION = 86400
+
 # If margin fraction requirements for the market are higher than that, do not take the trade.
 INITIAL_MARGIN_FRACTION_LIMIT = 0.5
+
 # TELEGRAM config (needs token and chat_id on private config)
 TELEGRAM_ENABLED = False
 TELEGRAM_SEND_URL = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
@@ -92,8 +98,8 @@ def position():
         account = account_response.data['account']
         position_id = account['positionId']
         market_req = client.public.get_markets(market=market)
-        price_long = float(market_req.data['markets'][market]['oraclePrice'])
-        price_short = float(market_req.data['markets'][market]['indexPrice'])
+        price_long = float(market_req.data['markets'][market]['oraclePrice']) # Oracle price for longs
+        price_short = float(market_req.data['markets'][market]['indexPrice']) # Index price for shorts
         order_params = {
             'position_id': position_id,
             'market': market,
@@ -101,7 +107,7 @@ def position():
             'post_only': POST_ONLY,
             'price': price_long if direction == 'Long' else price_short,
             'reduce_only': True if command == 'Exit' else False,
-            'time_in_force': str('IOC') if command == 'Exit' else str('IOC'),
+            'time_in_force': str('IOC'),
             'expiration_epoch_seconds': int(time.time()) + ORDER_EXPIRATION,
         }
         logging.info('Order params before setting side: {}'.format(order_params))
@@ -156,66 +162,63 @@ def position():
                 message = 'Order {} successfully posted, order response data : {}'.format(order_id, order_response.data['order'])
                 logging.info(order_response)
                 logging.info(message)
+                send_telegram_message(message)
                 time.sleep(2)
                 if command == 'Entry':
                     ordersize = str(round(newsize, len(market_data.data['markets'][market]['assetResolution'])))
-                    # Also make a stop loss order
-                    if direction == 'Long':
-                        stop_limit_price = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
-                        stop_limit_trigger = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
-                    else:
-                        stop_limit_price = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
-                        stop_limit_trigger = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
+                    if ENABLE_SL:
+                        if direction == 'Long':
+                            stop_limit_price = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
+                            stop_limit_trigger = '%.1f' % (order_price * (1 - (STOP_LOSS_PERC/100)))
+                        else:
+                            stop_limit_price = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
+                            stop_limit_trigger = '%.1f' % (order_price * (1 + (STOP_LOSS_PERC/100)))
+                            
+                        stop_limit_price = round(tick * round(float(stop_limit_price) / tick),4)
+                        stop_limit_trigger = round(tick * round(float(stop_limit_trigger) / tick),4)
                         
-                    stop_limit_price = round(tick * round(float(stop_limit_price) / tick),4)
-                    stop_limit_trigger = round(tick * round(float(stop_limit_trigger) / tick),4)
-                    
-                    stoploss_order = client.private.create_order(
-                        position_id=position_id,
-                        market=market,
-                        side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
-                        order_type=ORDER_TYPE_STOP,
-                        post_only=False,
-                        reduce_only=True,
-                        size=ordersize,
-                        price=str(stop_limit_price),
-                        trigger_price=str(stop_limit_trigger),
-                        limit_fee=str(0.1),
-                        time_in_force= str('IOC'),
-                        expiration_epoch_seconds=time.time() + 15000,
-                    ).data
-                    #stoploss_order.data['order']
-                    #message = 'Order {} successfully posted, order response data : {}'.format(stoploss_order.data['order']['id'], stoploss_order.data['order'])
-                    logging.info(stoploss_order)
-                    # Also make a take-profit order
-                    if direction == 'Long':
-                        take_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
-                        trigger_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
-                    else:
-                        take_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
-                        trigger_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
-                    
-                    take_profit_price = round(tick * round(float(take_profit_price) / tick),4)
-                    trigger_profit_price = round(tick * round(float(trigger_profit_price) / tick),4)
-                    
-                    take_profit_order = client.private.create_order(
-                        position_id=position_id,
-                        market=market,
-                        side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
-                        order_type=ORDER_TYPE_TAKE_PROFIT,
-                        post_only=False,
-                        size=ordersize,
-                        reduce_only=True,
-                        price=str(take_profit_price),
-                        trigger_price=str(trigger_profit_price),
-                        limit_fee=str(0.1),
-                        time_in_force= str('IOC'),
-                        expiration_epoch_seconds=time.time() + 15000,
-                    ).data
-                    #take_profit_order.data['order']
-                    #message = 'Order {} successfully posted, order response data : {}'.format(take_profit_order.data['order']['id'], take_profit_order.data['order'])
-                    logging.info(take_profit_order)
-                send_telegram_message(message)
+                        stoploss_order = client.private.create_order(
+                            position_id=position_id,
+                            market=market,
+                            side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
+                            order_type=ORDER_TYPE_STOP,
+                            post_only=False,
+                            reduce_only=True,
+                            size=ordersize,
+                            price=str(stop_limit_price),
+                            trigger_price=str(stop_limit_trigger),
+                            limit_fee=str(0.1),
+                            time_in_force= str('IOC'),
+                            expiration_epoch_seconds=time.time() + 15000,
+                        ).data
+                        logging.info(stoploss_order)
+                        
+                    if ENABLE_TP:
+                        if direction == 'Long':
+                            take_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
+                            trigger_profit_price = '%.1f' % (order_price * (1 + (PROFIT_PERC/100)))
+                        else:
+                            take_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
+                            trigger_profit_price = '%.1f' % (order_price * (1 - (PROFIT_PERC/100)))
+                        
+                        take_profit_price = round(tick * round(float(take_profit_price) / tick),4)
+                        trigger_profit_price = round(tick * round(float(trigger_profit_price) / tick),4)
+                        
+                        take_profit_order = client.private.create_order(
+                            position_id=position_id,
+                            market=market,
+                            side=ORDER_SIDE_SELL if direction == 'Long' else ORDER_SIDE_BUY,
+                            order_type=ORDER_TYPE_TAKE_PROFIT,
+                            post_only=False,
+                            size=ordersize,
+                            reduce_only=True,
+                            price=str(take_profit_price),
+                            trigger_price=str(trigger_profit_price),
+                            limit_fee=str(0.1),
+                            time_in_force= str('IOC'),
+                            expiration_epoch_seconds=time.time() + 15000,
+                        ).data
+                        logging.info(take_profit_order)
         except Exception as err:
             message = 'Error posting order : {}'.format(err)
             logging.error(message)
